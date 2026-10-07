@@ -1,0 +1,97 @@
+@import "tailwindcss";
+
+/*
+  Design direction: architectural blueprint / cyanotype print.
+  Architects' own working material -- deep cyanotype blue instead of the
+  generic dark-mode black, mono "spec sheet" readouts instead of generic
+  cards, corner registration marks (from print production sheets) as the
+  one signature motif.
+*/
+
+:root {
+  --color-blueprint: #0e2a47;
+  --color-blueprint-light: #163a5f;
+  --color-blueprint-lighter: #1f4d78;
+  --color-linework: #e8f1f8;
+  --color-cyan-accent: #5fb8e0;
+  --color-signal: #e8a857;
+  --color-graphite: #8fa8c0;
+}
+
+@theme inline {
+  --color-blueprint: var(--color-blueprint);
+  --color-blueprint-light: var(--color-blueprint-light);
+  --color-blueprint-lighter: var(--color-blueprint-lighter);
+  --color-linework: var(--color-linework);
+  --color-cyan-accent: var(--color-cyan-accent);
+  --color-signal: var(--color-signal);
+  --color-graphite: var(--color-graphite);
+
+  --font-display: var(--font-space-grotesk);
+  --font-body: var(--font-inter);
+  --font-tech: var(--font-plex-mono);
+}
+
+body {
+  background: var(--color-blueprint);
+  color: var(--color-linework);
+  font-family: var(--font-body);
+}
+
+/* Subtle drafting-paper grid, low-opacity so it reads as texture, not noise */
+.blueprint-grid {
+  background-image:
+    linear-gradient(var(--color-blueprint-light) 1px, transparent 1px),
+    linear-gradient(90deg, var(--color-blueprint-light) 1px, transparent 1px);
+  background-size: 32px 32px;
+  background-position: -1px -1px;
+  opacity: 0.35;
+}
+
+/* Corner registration marks -- the signature element, borrowed from
+   architectural print sheets. Used sparingly, on one panel at a time. */
+.registration-marks {
+  position: relative;
+}
+.registration-marks::before,
+.registration-marks::after {
+  content: "";
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+}
+.registration-marks::before {
+  top: -1px;
+  left: -1px;
+  border-top: 1.5px solid var(--color-cyan-accent);
+  border-left: 1.5px solid var(--color-cyan-accent);
+}
+.registration-marks::after {
+  bottom: -1px;
+  right: -1px;
+  border-bottom: 1.5px solid var(--color-cyan-accent);
+  border-right: 1.5px solid var(--color-cyan-accent);
+}
+
+/* Indeterminate progress bar for the AI steps, which have no real
+   percentage to report. */
+@keyframes loading-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}
+.loading-bar {
+  animation: loading-sweep 1.4s ease-in-out infinite;
+}
+
+/* Respect the OS "reduce motion" setting rather than animating regardless. */
+@media (prefers-reduced-motion: reduce) {
+  .loading-bar {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+  }
+}
