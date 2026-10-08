@@ -68,4 +68,7 @@ export type RenderRequestBody = {
   spaceType: string;
   finishes: PaletteSwatch[];
   resolution?: "1K" | "2K" | "4K";
+  // When set, recolor this existing render (same design, new colors)
+  // instead of generating a fresh design from the sketch.
+  baseRenderId?: string;
 };

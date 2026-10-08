@@ -1,20 +1,47 @@
 // Gemini integration: the two AI calls in the pipeline.
 //
 //   analyzeDesign()  -> gemini-3-flash-preview (cheap, fast, vision+JSON)
-//   generateRender() -> gemini-3-pro-image-preview, "Nano Banana Pro"
-//                        (the paid, high-quality image model)
+//   generateRender() -> gemini-nano-banana-2.1 (Flash-speed image model)
+//                        set GEMINI_RENDER_MODEL=gemini-3-pro-image for
+//                        Nano Banana Pro: higher quality, much slower
 //
 // This is a fast-moving preview API. If a call starts failing, check
 // https://ai.google.dev/gemini-api/docs first — model names and the
 // response shape for image output are the most likely things to shift.
 
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 import type { AnalysisResult, PaletteSwatch } from "@/lib/types";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 const ANALYSIS_MODEL = "gemini-3-flash-preview";
-const RENDER_MODEL = "gemini-3-pro-image-preview"; // Nano Banana Pro
+const RENDER_MODEL =
+  process.env.GEMINI_RENDER_MODEL || "gemini-nano-banana-2.1";
+// Recolors are a constrained edit of an existing render, so a faster image
+// model can do them. Defaults to the render model; override via env.
+const RECOLOR_MODEL = process.env.GEMINI_RECOLOR_MODEL || RENDER_MODEL;
+
+// Thinking is the biggest latency cost on the Flash image models (2.1
+// defaults to "medium"). Minimal keeps them fast; the prompts are explicit
+// enough not to need planning. Pro has no minimal level, so leave it alone.
+function thinkingConfigFor(model: string) {
+  return model.includes("pro")
+    ? {}
+    : { thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL } };
+}
+
+// Low temperature + a fixed seed per upload keeps generation as repeatable
+// as the model allows: regenerating the same sketch with the same inputs
+// should give (close to) the same design rather than a fresh reinvention.
+const RENDER_TEMPERATURE = 0.2;
+
+export function seedFromId(id: string): number {
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) {
+    hash = (Math.imul(hash, 31) + id.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
 
 // Preview APIs fail transiently more often than stable ones. A single
 // unlucky 503 shouldn't cost the user their render, but retrying a
@@ -23,7 +50,9 @@ const RENDER_MODEL = "gemini-3-pro-image-preview"; // Nano Banana Pro
 
 const MAX_ATTEMPTS = 3;
 const ANALYSIS_TIMEOUT_MS = 30_000;
-const RENDER_TIMEOUT_MS = 90_000;
+// Flash image renders finish well inside this; a call that hasn't returned
+// by then is usually hung, and failing fast beats a 90s spinner.
+const RENDER_TIMEOUT_MS = 40_000;
 
 export class GeminiError extends Error {
   constructor(
@@ -152,6 +181,7 @@ export async function analyzeDesign(
         ],
         config: {
           responseMimeType: "application/json",
+          thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
           abortSignal: signal,
         },
       })
@@ -253,13 +283,68 @@ export async function generateRender(
   style: string,
   spaceType: string,
   finishes: PaletteSwatch[],
-  resolution: "1K" | "2K" | "4K" = "2K"
+  resolution: "1K" | "2K" | "4K" = "2K",
+  seed?: number
 ): Promise<GeneratedRender> {
   const prompt = buildRenderPrompt(style, spaceType, finishes);
 
-  const response = await withRetry("Render", RENDER_TIMEOUT_MS, (signal) =>
+  return generateImage(RENDER_MODEL, "Render", prompt, imageBase64, mimeType, resolution, seed);
+}
+
+function buildRecolorPrompt(
+  previousFinishes: PaletteSwatch[],
+  finishes: PaletteSwatch[]
+): string {
+  const previous = new Map(previousFinishes.map((f) => [f.label, f.hex]));
+  const lines = finishes.map((f) => {
+    const before = previous.get(f.label);
+    return before && before.toLowerCase() !== f.hex.toLowerCase()
+      ? `- ${f.label}: change from ${before} to ${f.hex}`
+      : `- ${f.label}: keep as ${f.hex}`;
+  });
+
+  return `Edit this photorealistic architectural render. Change ONLY the colors
+of the surfaces listed below. Everything else must stay exactly the same:
+geometry, camera angle, framing, furniture, objects, decor, materials and
+their textures, lighting, shadows, reflections, and background. Do not add,
+remove, move, or restyle anything.
+
+Color changes:
+${lines.join("\n")}
+
+Keep the material type of each surface (e.g. wood stays wood, plaster stays
+plaster) — only shift its color/tint to the new value.`;
+}
+
+// Recolor an existing render instead of re-rendering the sketch. Starting
+// from the sketch makes the model re-invent furniture, materials and
+// lighting every time; starting from the finished render and asking only
+// for a color shift keeps the design and changes just the palette.
+export async function recolorRender(
+  renderBase64: string,
+  mimeType: string,
+  previousFinishes: PaletteSwatch[],
+  finishes: PaletteSwatch[],
+  resolution: "1K" | "2K" | "4K" = "2K",
+  seed?: number
+): Promise<GeneratedRender> {
+  const prompt = buildRecolorPrompt(previousFinishes, finishes);
+
+  return generateImage(RECOLOR_MODEL, "Recolor", prompt, renderBase64, mimeType, resolution, seed);
+}
+
+async function generateImage(
+  model: string,
+  label: string,
+  prompt: string,
+  imageBase64: string,
+  mimeType: string,
+  resolution: "1K" | "2K" | "4K",
+  seed?: number
+): Promise<GeneratedRender> {
+  const response = await withRetry(label, RENDER_TIMEOUT_MS, (signal) =>
     ai.models.generateContent({
-      model: RENDER_MODEL,
+      model,
       contents: [
         {
           role: "user",
@@ -272,6 +357,9 @@ export async function generateRender(
       config: {
         responseModalities: ["IMAGE"],
         imageConfig: { imageSize: resolution },
+        temperature: RENDER_TEMPERATURE,
+        ...thinkingConfigFor(model),
+        ...(seed !== undefined ? { seed } : {}),
         abortSignal: signal,
       },
     })
@@ -281,7 +369,7 @@ export async function generateRender(
   const imagePart = parts.find((p) => p.inlineData?.data);
 
   if (!imagePart?.inlineData?.data) {
-    throw new Error("Gemini returned no image data for the render");
+    throw new Error(`Gemini returned no image data for the ${label.toLowerCase()}`);
   }
 
   return {

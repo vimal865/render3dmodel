@@ -9,7 +9,12 @@
 // directly, and have a worker call the same Gemini functions.
 
 import { createClient } from "@/lib/supabase/server";
-import { analyzeDesign, generateRender } from "@/lib/gemini";
+import {
+  analyzeDesign,
+  generateRender,
+  recolorRender,
+  seedFromId,
+} from "@/lib/gemini";
 import { assertAnalysisQuota, assertRenderQuota } from "@/lib/quota";
 import type {
   AnalysisResult,
@@ -23,6 +28,12 @@ function extFromMimeType(mimeType: string): string {
   if (mimeType.includes("png")) return "png";
   if (mimeType.includes("webp")) return "webp";
   return "jpg";
+}
+
+function mimeTypeFromPath(path: string): string {
+  if (path.endsWith(".png")) return "image/png";
+  if (path.endsWith(".webp")) return "image/webp";
+  return "image/jpeg";
 }
 
 export async function processUpload(params: {
@@ -104,6 +115,7 @@ export async function processRenderRequest(params: {
   spaceType: string;
   finishes: PaletteSwatch[];
   resolution?: "1K" | "2K" | "4K";
+  baseRenderId?: string;
 }): Promise<RenderRecord & { url: string }> {
   await assertRenderQuota(params.userId);
 
@@ -119,19 +131,41 @@ export async function processRenderRequest(params: {
     throw new Error("Upload not found");
   }
 
-  const { data: fileData, error: downloadError } = await supabase.storage
-    .from("uploads")
-    .download(uploadRow.storage_path);
+  // Recolor: the base render must be a finished render of this same upload
+  // (the upload ownership check above covers the user).
+  let baseRender: RenderRecord | null = null;
+  if (params.baseRenderId) {
+    const { data: baseRow } = await supabase
+      .from("renders")
+      .select("*")
+      .eq("id", params.baseRenderId)
+      .eq("upload_id", params.uploadId)
+      .eq("status", "complete")
+      .single();
+    if (!baseRow?.storage_path) {
+      throw new Error("Base render not found");
+    }
+    baseRender = baseRow as RenderRecord;
+  }
+
+  const { data: fileData, error: downloadError } = baseRender
+    ? await supabase.storage.from("renders").download(baseRender.storage_path!)
+    : await supabase.storage.from("uploads").download(uploadRow.storage_path);
   if (downloadError || !fileData) {
-    throw new Error("Could not load the original upload for rendering");
+    throw new Error(
+      baseRender
+        ? "Could not load the base render for recoloring"
+        : "Could not load the original upload for rendering"
+    );
   }
 
   const originalBuffer = Buffer.from(await fileData.arrayBuffer());
   // Prefer the mime type recorded at upload time. Supabase's download
   // blob frequently reports a generic type, and handing the wrong one to
   // Gemini alongside the bytes produces unpredictable results.
-  const originalMimeType =
-    uploadRow.mime_type || fileData.type || "image/png";
+  const originalMimeType = baseRender
+    ? mimeTypeFromPath(baseRender.storage_path!)
+    : uploadRow.mime_type || fileData.type || "image/png";
   const renderId = crypto.randomUUID();
 
   const { data: renderRow, error: insertError } = await supabase
@@ -150,14 +184,26 @@ export async function processRenderRequest(params: {
   }
 
   try {
-    const result = await generateRender(
-      originalBuffer.toString("base64"),
-      originalMimeType,
-      params.style,
-      params.spaceType,
-      params.finishes,
-      params.resolution ?? "2K"
-    );
+    // Same upload -> same seed, so regenerating gives a repeatable design.
+    const seed = seedFromId(params.uploadId);
+    const result = baseRender
+      ? await recolorRender(
+          originalBuffer.toString("base64"),
+          originalMimeType,
+          baseRender.finishes,
+          params.finishes,
+          params.resolution ?? "2K",
+          seed
+        )
+      : await generateRender(
+          originalBuffer.toString("base64"),
+          originalMimeType,
+          params.style,
+          params.spaceType,
+          params.finishes,
+          params.resolution ?? "2K",
+          seed
+        );
 
     const storagePath = `${params.userId}/${renderId}.${extFromMimeType(result.mimeType)}`;
 

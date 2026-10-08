@@ -24,6 +24,10 @@ export default function UploadFlow({
   const [resolution, setResolution] = useState<Resolution>("2K");
   const [renderId, setRenderId] = useState<string | null>(null);
   const [renderUrl, setRenderUrl] = useState<string | null>(null);
+  // The last render generated from the sketch. Recolors always edit this
+  // one (not the previous recolor) so repeated color tweaks don't drift.
+  const [designRenderId, setDesignRenderId] = useState<string | null>(null);
+  const [recolorMode, setRecolorMode] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [remaining, setRemaining] = useState(remainingRenders);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -102,6 +106,7 @@ export default function UploadFlow({
           spaceType: analysis.spaceType,
           finishes,
           resolution,
+          baseRenderId: recolorMode ? designRenderId : undefined,
         }),
       });
       const data = await res.json();
@@ -111,6 +116,7 @@ export default function UploadFlow({
 
       setRenderId(data.render.id);
       setRenderUrl(data.render.url);
+      if (!recolorMode) setDesignRenderId(data.render.id);
       setRemaining((n) => Math.max(0, n - 1));
       setStep("result");
     } catch (err) {
@@ -119,11 +125,18 @@ export default function UploadFlow({
     }
   }
 
-  // Goes back to the review step with the same upload, analysis, style,
-  // finishes, and resolution still in place — for retrying a render that
-  // came out badly, or trying a different preset without re-uploading.
-  function regenerate() {
+  // Both go back to the review step with the same upload, analysis, style,
+  // finishes, and resolution still in place. "Change colors" edits the
+  // current design; "New design" re-renders from the sketch.
+  function changeColors() {
     setError(null);
+    setRecolorMode(true);
+    setStep("review");
+  }
+
+  function newDesign() {
+    setError(null);
+    setRecolorMode(false);
     setStep("review");
   }
 
@@ -136,6 +149,8 @@ export default function UploadFlow({
     setFinishes([]);
     setRenderId(null);
     setRenderUrl(null);
+    setDesignRenderId(null);
+    setRecolorMode(false);
     setError(null);
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
@@ -190,6 +205,8 @@ export default function UploadFlow({
             onResolutionChange={setResolution}
             onGenerate={handleGenerateRender}
             onStartOver={reset}
+            recolorMode={recolorMode && !!designRenderId}
+            onRecolorModeChange={designRenderId ? setRecolorMode : undefined}
             disabled={remaining === 0}
           />
           <QuotaNote remaining={remaining} />
@@ -200,8 +217,12 @@ export default function UploadFlow({
         <ProgressPanel
           previewUrl={previewUrl}
           label="RENDERING"
-          title={`Generating your ${resolution} photoreal render`}
-          detail="Usually takes 8-20 seconds. Keep this tab open."
+          title={
+            recolorMode
+              ? `Applying your new colors at ${resolution}`
+              : `Generating your ${resolution} photoreal render`
+          }
+          detail="Usually takes 5-15 seconds. Keep this tab open."
         />
       )}
 
@@ -224,11 +245,18 @@ export default function UploadFlow({
               Download {resolution}
             </a>
             <button
-              onClick={regenerate}
+              onClick={changeColors}
               disabled={remaining === 0}
               className="border border-blueprint-lighter px-4 py-2.5 font-display text-sm text-linework transition-colors hover:border-cyan-accent disabled:cursor-not-allowed disabled:opacity-50"
             >
-              Regenerate
+              Change colors
+            </button>
+            <button
+              onClick={newDesign}
+              disabled={remaining === 0}
+              className="border border-blueprint-lighter px-4 py-2.5 font-display text-sm text-linework transition-colors hover:border-cyan-accent disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              New design
             </button>
             <button
               onClick={reset}
@@ -489,6 +517,8 @@ function ReviewPanel({
   onResolutionChange,
   onGenerate,
   onStartOver,
+  recolorMode,
+  onRecolorModeChange,
   disabled,
 }: {
   previewUrl: string | null;
@@ -501,6 +531,8 @@ function ReviewPanel({
   onResolutionChange: (r: Resolution) => void;
   onGenerate: () => void;
   onStartOver: () => void;
+  recolorMode: boolean;
+  onRecolorModeChange?: (on: boolean) => void;
   disabled: boolean;
 }) {
   const scoreEntries = Object.entries(analysis.scores) as [
@@ -612,6 +644,25 @@ function ReviewPanel({
         </div>
       </div>
 
+      {onRecolorModeChange && (
+        <div className="mt-6 border-t border-blueprint-lighter pt-6">
+          <label className="flex cursor-pointer items-center gap-2 font-tech text-xs text-linework">
+            <input
+              type="checkbox"
+              checked={recolorMode}
+              onChange={(e) => onRecolorModeChange(e.target.checked)}
+              className="accent-cyan-accent"
+            />
+            Keep the current design — change colors only
+          </label>
+          <p className="mt-1 font-body text-xs text-graphite">
+            {recolorMode
+              ? "Furniture, materials, lighting, and layout stay the same. Style changes are ignored; only the palette is applied."
+              : "Renders a fresh design from your sketch with the selected style and palette."}
+          </p>
+        </div>
+      )}
+
       <div className="mt-6 flex flex-wrap items-center justify-between gap-4 border-t border-blueprint-lighter pt-6">
         <div className="flex items-center gap-3">
           <label
@@ -644,7 +695,7 @@ function ReviewPanel({
             disabled={disabled}
             className="bg-signal px-5 py-2.5 font-display text-sm font-semibold text-blueprint transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Approve &amp; render
+            {recolorMode ? "Apply colors" : <>Approve &amp; render</>}
           </button>
         </div>
       </div>

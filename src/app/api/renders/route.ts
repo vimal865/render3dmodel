@@ -6,8 +6,8 @@ import { GeminiError } from "@/lib/gemini";
 import { logEvent, startTimer, renderCost } from "@/lib/activity-log";
 import type { RenderRequestBody } from "@/lib/types";
 
-// Nano Banana Pro generation runs ~8-12s. 45s leaves headroom for network
-// variance while staying under Vercel's 60s Hobby ceiling.
+// Flash image generation runs a few seconds; 45s leaves headroom for a
+// retry while staying under Vercel's 60s Hobby ceiling.
 export const maxDuration = 45;
 
 export async function POST(request: Request) {
@@ -39,6 +39,7 @@ export async function POST(request: Request) {
         style: body.style,
         resolution: body.resolution ?? "2K",
         finishCount: body.finishes.length,
+        mode: body.baseRenderId ? "recolor" : "render",
       },
       request,
     });
@@ -50,6 +51,7 @@ export async function POST(request: Request) {
       spaceType: body.spaceType ?? "Interior",
       finishes: body.finishes,
       resolution: body.resolution ?? "2K",
+      baseRenderId: body.baseRenderId,
     });
 
     await logEvent({
